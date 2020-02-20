@@ -15,7 +15,7 @@ module map_004
 	
 	
 	assign sync_m2 = 1;
-	assign mir_4sc = 1;//enable support for 4-screen mirroring. for activation should be ensabled in sys_cfg also
+	assign mir_4sc = 1;//enable support for 4-screen mirroring. for activation should be enabled in sys_cfg also
 	assign srm_addr[12:0] = cpu_addr[12:0];
 	assign prg_oe = cpu_rw;
 	assign chr_oe = !ppu_oe;
@@ -39,18 +39,32 @@ module map_004
 	assign ciram_a10 = !mir_mod ? ppu_addr[10] : ppu_addr[11];
 	assign ciram_ce = !ppu_addr[13];
 	
-	
+	// pass the bottom 13 CPU address lines through to the current prg address
 	assign prg_addr[12:0] = cpu_addr[12:0];
+	// the next 6 address lines are informed by the prg mode and the bank_dat saved bits
+	//   this helps facilitate the modular fixed bank for PRG in MMC3
 	assign prg_addr[18:13] =
 	cpu_addr[14:13] == 0 ? (prg_mod == 0 ? bank_dat[6][5:0] : 6'b111110) :
 	cpu_addr[14:13] == 1 ? bank_dat[7][5:0] : 
 	cpu_addr[14:13] == 2 ? (prg_mod == 1 ? bank_dat[6][5:0] : 6'b111110) : 
 	6'b111111;
 	
-	
+	// pass the PPU address lines through to the current chr address
 	assign chr_addr[9:0] = ppu_addr[9:0];
+	// the next 8 address lines are informed by the bank_dat saved bits.
+	//   the exact values are dependent on which character mode we're in.
+	// The 18 total bits of chr_addr constitute the 256k max CHR capacity for MMC3
+	// To modify MMC3 to address more CHR ROM, you would need to have a way to fill up more bits
+	//   and then use them when presenting graphics to the PPU address bus.
 	assign chr_addr[17:10] = cfg_chr_ram ? chr[4:0] : chr[7:0];//ines 2.0 reuired to support 32k ram
 	
+	// Determine the upper bits of the full chr address. Effectively an 18-bit address where the
+	//   bottom 10 bits are supplied directly by the PPU and the other 8 bits are either
+	//   retrieved from the stored bank_dat bits (written to $8001) or deduced based
+	//   on the character mode (i.e. which pattern table uses 2k chunks).
+	// In the simple case, we just use the bank_dat bits, but when loading from
+	//   a pattern table (when A12 is high), we have to check the character mode
+	//   to do the 1k/2k stuff.
 	wire [7:0]chr = 
 	ppu_addr[12:11] == {chr_mod, 1'b0} ? {bank_dat[0][7:1], ppu_addr[10]} :
 	ppu_addr[12:11] == {chr_mod, 1'b1} ? {bank_dat[1][7:1], ppu_addr[10]} : 
@@ -59,16 +73,31 @@ module map_004
 	ppu_addr[11:10] == 2 ? bank_dat[4][7:0] : 
    bank_dat[5][7:0];
 	
+	// current register address. MMC3 doesn't decode fully, so we only pay attention
+	//   to xxx. .... .... ...x This gives us the ability to distinguish
+	//   8000, 8001, A000, A001, C000, C001, E000, and E001
 	wire [15:0]reg_addr = {cpu_addr[15:13], 12'd0,  cpu_addr[0]};
 	
+	// The current PRG mode. 1 for split fixed bank
 	wire prg_mod = bank_sel[6];
+	
+	// The current CHR mode. 0 for 2k banks in first pattern table.
 	wire chr_mod = bank_sel[7];
+	
+	// The current mirror mode. 0 for vertical, 1 for horizontal.  ignored in 4-screen mode
 	wire mir_mod = mmc_ctrl[0][0];
+	
+	// PRG RAM settings.  6th bit controls read-only. 7th bit enables/disables RAM.
 	wire ram_we_off = mmc_ctrl[1][6];
 	wire ram_ce_on = mmc_ctrl[1][7];
 	
+	// register for current bank slot.  Set by writes to $8000
 	reg [7:0]bank_sel;
+	
+	// register for all current bank numbers.  individual banks set by writes to $8001
 	reg [7:0]bank_dat[8];
+	
+	// register for other mmc3 state. Used to set mirroring (ignored in 4-screen mode) and PRG RAM settings.
 	reg [7:0]mmc_ctrl[2];
 	
 	always @(negedge m2)
@@ -99,9 +128,18 @@ module map_004
 		else
 	if(!cpu_rw)
 	case(reg_addr[15:0])
+	
+		// Writes to $8000 set the "bank select" byte (top 3 bits set bank configuration)
 		16'h8000:bank_sel[7:0] <= cpu_dat[7:0];
+		
+		// Writes to $8001 save the bank number
+		//   We do a "lookup" here to make sure we write to the correct bank slot
 		16'h8001:bank_dat[bank_sel[2:0]][7:0] <= cpu_dat[7:0];
+		
+		// Writes to $A000 set the mirroring (ignored in 4-screen mode)
 		16'hA000:mmc_ctrl[0][7:0] <= cpu_dat[7:0];
+		
+		// Writes to $A001 set PRG RAM configuration and settings. Top bit enables, 6th bit sets read-only.
 		16'hA001:mmc_ctrl[1][7:0] <= cpu_dat[7:0];
 	endcase
 
@@ -148,7 +186,7 @@ module irq_mmc3
 	reg [7:0]irq_ctr;
 	reg irq_on, irq_pend, irq_reload_req;
 
-	
+	// This "runs" on every clock cycle when the clock goes from high to low
 	always @(negedge m2)
 	if(ss_act)
 	begin
@@ -165,7 +203,7 @@ module irq_mmc3
 		16'hE000:irq_on <= 0;
 		16'hE001:irq_on <= 1;
 	endcase
-
+		
 	wire ctr_reload = reg_addr[15:0] == 16'hC001 & !cpu_rw & m2;
 	wire [7:0]ctr_next = irq_ctr == 0 ? irq_latch : irq_ctr - 1;
 	wire irq_trigger = mmc3a ? ctr_next == 0 & (irq_ctr != 0 | irq_reload_req) : ctr_next == 0;
